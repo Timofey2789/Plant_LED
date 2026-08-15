@@ -30,9 +30,9 @@
 #include <EEPROM.h>
 
 // memory
-const int ADDR_TIME_ON = 0; // unsigned long
-const int ADDR_TIME_OFF = 4; // unsigned long
-const int ADDR_PPM_DELAY = 8; // unsigned long
+const int ADDR_TIME_ON = 0; // 2 byte
+const int ADDR_TIME_OFF = 2; // 2 byte
+const int ADDR_PPM_DELAY = 4; // unsigned long
 #endif
 
 const byte SRCLK47			 = 2; // pin 11 SN74HC595 for 4digital segment
@@ -88,21 +88,21 @@ unsigned long actualIntervalTIME = 0; // milisec
 //    // 571000: 440 -> 100 увеличить
 //  #endif
 // #endif
-
-unsigned long currentTime = 0;
-
+byte currentTimeHours = 12;
+byte currentTimeMinutes = 0;
+byte currentTimeSeconds = 0;
 byte relayState = 0;
 byte lastRelayState = 0;
-
-unsigned long relayOnTime = 0;
-unsigned long relayOffTime = 0;
-
+byte relayOnTimeHours = 0;
+byte relayOnTimeMinutes = 0;
+byte relayOffTimeHours = 0;
+byte relayOffTimeMinutes = 0;
 unsigned long previousMillisDigits = 0; // will store last time 4-Digits was updated
 const unsigned long intervalDigits = 1; // milisec
-const byte hexArray[] = {B11111100, B01100000, B11011010, B11110010,
-						 B01100110, B10110110, B10111110, B11100000,
-						 B11111110, B11110110, B11101110, B00111110,
-						 B10011100, B01111010, B10011110, B10001110}; // abcdefg.
+// const byte hexArray[] = {B11111100, B01100000, B11011010, B11110010,
+// 						    B01100110, B10110110, B10111110, B11100000,
+// 						    B11111110, B11110110, B11101110, B00111110,
+// 						    B10011100, B01111010, B10011110, B10001110}; // abcdefg.
 // const byte dotSign = B00000001;
 // const byte minusSign = B00000010;
 // const byte prog1Array[] = {B00000000, B00000000, B11001110, B01100000};
@@ -176,8 +176,12 @@ const float BETA_TEMP = B_COEFFICIENT / 298.15;
 unsigned long previousTempSensor = 0;
 const unsigned long intervalTempSensor = 5000; // Проверяем температуру раз в 5 секунд
 // TEMPORARY
-unsigned long measurementNum = 0;
-float tempC_aver = 0.0;
+// unsigned long measurementNum = 0;
+// float tempC_aver = 0.0;
+float tempC_aver = 25.0; // Стартовое значение (примерная комнатная температура)
+const float k_filter = 0.05; // Коэффициент фильтрации (от 0.01 до 1.0)
+
+
 void setup() {
   Serial.begin(9600);
   pinMode(OE47, OUTPUT);
@@ -185,7 +189,7 @@ void setup() {
   pinMode(SER47, OUTPUT);
   pinMode(RCLK47, OUTPUT);
   pinMode(SRCLK47, OUTPUT);
-  clearShift(SRCLK47, SER47, RCLK47);
+  clearShift();
   pinMode (DIGITS[0], OUTPUT);
   pinMode (DIGITS[1], OUTPUT);
   pinMode (DIGITS[2], OUTPUT);
@@ -220,18 +224,16 @@ void loop() {
       // Serial.println("degree Celsius");
 	  
       // average temperature TEMPORARY (make overflow)
-      tempC_aver *= measurementNum;
-      tempC_aver += tempC;
-      measurementNum++;
-      if (measurementNum) tempC_aver /= measurementNum;
+      // tempC_aver *= measurementNum;
+      // tempC_aver += tempC;
+      // measurementNum++;
+      // if (measurementNum) tempC_aver /= measurementNum;
       // Serial.print(" ");
       // Serial.println(tempC_aver);
       //
 
       // for future
-      // float tempC_aver = 25.0; // Стартовое значение (примерная комнатная температура)
-      // const float k_filter = 0.05; // Коэффициент фильтрации (от 0.01 до 1.0)
-      // tempC_aver = (tempC * k_filter) + (tempC_aver * (1.0 - k_filter));
+      tempC_aver = (tempC * k_filter) + (tempC_aver * (1.0 - k_filter));
     }
     if (workMode == workState::VIEW_TEMP) {
       fillInFlag = 1;
@@ -248,9 +250,20 @@ void loop() {
     calibrationCounter = calibrationCounter + ppmDelay; // add calibration increment (microsec)
 #endif
     // Serial.println(previousMillisTIME);
-    // setTime(currentTime);
     if (workMode != workState::SET_HOUR_TIME && workMode != workState::SET_MINUTE_TIME) {
-      currentTime = ++currentTime%86400;
+      // КАСКАДНЫЙ СЧЕТЧИК НА БЫСТРЫХ БАЙТАХ:
+      currentTimeSeconds++;
+      if (currentTimeSeconds >= 60) {
+        currentTimeSeconds = 0;
+        currentTimeMinutes++;
+        if (currentTimeMinutes >= 60) {
+          currentTimeMinutes = 0;
+          currentTimeHours++;
+          if (currentTimeHours >= 24) {
+            currentTimeHours = 0;
+          }
+        }
+      }
       if (workMode == workState::VIEW_TIME) {
         fillInFlag = 1;
       }
@@ -266,6 +279,7 @@ void loop() {
           // Serial.println(calibrationCounter);
         calibrationCounter = calibrationCounter - accTimeCalib; // microsec
         previousMillisTIME = previousMillisTIME + delayMillis; // milisec
+
       }
     }
   } else {
@@ -279,19 +293,22 @@ void loop() {
 #endif
 
   if (workMode == workState::VIEW_TIME) {
-    if (relayOnTime == relayOffTime) {
+    int currentMinutesOfDecay = (static_cast<int>(currentTimeHours) * 60) + currentTimeMinutes;
+    int relayOnMinutesOfDecay = (static_cast<int>(relayOnTimeHours) * 60) + relayOnTimeMinutes;
+    int relayOffMinutesOfDecay = (static_cast<int>(relayOffTimeHours) * 60) + relayOffTimeMinutes;
+    if (relayOnMinutesOfDecay == relayOffMinutesOfDecay) {
       relayState = 0;
-    } else if (relayOnTime < relayOffTime) {
+    } else if (relayOnMinutesOfDecay < relayOffMinutesOfDecay) {
       // Обычный режим: включено, если внутри интервала
-      relayState = (currentTime >= relayOnTime && currentTime < relayOffTime);
+      relayState = (currentMinutesOfDecay >= relayOnMinutesOfDecay && currentMinutesOfDecay < relayOffMinutesOfDecay);
     } else {
       // Режим через полночь: включено, если СЕЙЧАС позже начала ИЛИ раньше конца
-      relayState = (currentTime >= relayOnTime || currentTime < relayOffTime);
+      relayState = (currentMinutesOfDecay >= relayOnMinutesOfDecay || currentMinutesOfDecay < relayOffMinutesOfDecay);
     }
     if (lastRelayState != relayState) {
       lastRelayState = relayState;
       digitalWrite(RELAY, !relayState);
-      // Serial.println(relayState ? "RELAY ON" : "RELAY OFF");
+      Serial.println(relayState ? "RELAY ON" : "RELAY OFF");
     }
   }
 
@@ -397,7 +414,7 @@ void loop() {
         fillInFlag = 1;
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 1; // diap to blink
-        currentTime = currentTime - (currentTime%60); // set seconds = 0
+        currentTimeSeconds = 0;
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         workMode = workState::SET_HOUR_TIME;
       }
@@ -408,7 +425,7 @@ void loop() {
         displayVisible = !displayVisible;
       }
       if (buttonIncr == buttonState::PUSHED) {
-        handleTimeSetting(currentTime, true); // true = меняем часы
+        handleTimeSetting(currentTimeHours, true); // true = меняем часы
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
@@ -418,7 +435,7 @@ void loop() {
       if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncr) {
-            handleTimeSetting(currentTime, true);
+            handleTimeSetting(currentTimeHours, true); // true = меняем часы
             previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
             displayVisible = 1;
             previousMillisHoldIncr = currentMillis;
@@ -441,7 +458,7 @@ void loop() {
         displayVisible = !displayVisible;
       }
       if (buttonIncr == buttonState::PUSHED) {
-        handleTimeSetting(currentTime, false); // false = меняем минуты
+        handleTimeSetting(currentTimeMinutes, false); // false = меняем минуты
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
@@ -451,7 +468,7 @@ void loop() {
       if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncr) {
-            handleTimeSetting(currentTime, false);
+            handleTimeSetting(currentTimeMinutes, false); // false = меняем минуты
             previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
             displayVisible = 1;
             previousMillisHoldIncr = currentMillis;
@@ -478,7 +495,6 @@ void loop() {
         fillInFlag = 1;
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 1; // diap to blink
-        relayOnTime = relayOnTime - (relayOnTime%60); // set seconds = 0
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         workMode = workState::SET_HOUR_ON;
       }
@@ -489,7 +505,7 @@ void loop() {
         displayVisible = !displayVisible;
       }
       if (buttonIncr == buttonState::PUSHED) {
-        handleTimeSetting(relayOnTime, true);
+        handleTimeSetting(relayOnTimeHours, true); // true = меняем часы
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
@@ -499,7 +515,7 @@ void loop() {
       if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncr) {
-            handleTimeSetting(relayOnTime, true);
+            handleTimeSetting(relayOnTimeHours, true); // true = меняем часы
             previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
             displayVisible = 1;
             previousMillisHoldIncr = currentMillis;
@@ -522,7 +538,7 @@ void loop() {
         displayVisible = !displayVisible;
       }
       if (buttonIncr == buttonState::PUSHED) {
-        handleTimeSetting(relayOnTime, false);
+        handleTimeSetting(relayOnTimeMinutes, false); // false = меняем минуты
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на  текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
@@ -532,7 +548,7 @@ void loop() {
       if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncr) {
-            handleTimeSetting(relayOnTime, false);
+            handleTimeSetting(relayOnTimeMinutes, false); // false = меняем минуты
             previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
             displayVisible = 1;
             previousMillisHoldIncr = currentMillis;
@@ -567,7 +583,6 @@ void loop() {
         fillInFlag = 1;
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 1; // diap to blink
-        relayOffTime = relayOffTime - (relayOffTime%60); // set seconds = 0
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         workMode = workState::SET_HOUR_OFF;
       }
@@ -578,7 +593,7 @@ void loop() {
         displayVisible = !displayVisible;
       }
       if (buttonIncr == buttonState::PUSHED) {
-        handleTimeSetting(relayOffTime, true);
+        handleTimeSetting(relayOffTimeHours, true); // true = меняем часы
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
@@ -588,7 +603,7 @@ void loop() {
       if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncr) {
-            handleTimeSetting(relayOffTime, true);
+            handleTimeSetting(relayOffTimeHours, true); // true = меняем часы
             previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
             displayVisible = 1;
             previousMillisHoldIncr = currentMillis;
@@ -611,7 +626,7 @@ void loop() {
         displayVisible = !displayVisible;
       }
       if (buttonIncr == buttonState::PUSHED) {
-        handleTimeSetting(relayOffTime, false);
+        handleTimeSetting(relayOffTimeMinutes, false); // false = меняем минуты
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
@@ -621,7 +636,7 @@ void loop() {
       if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncr) {
-            handleTimeSetting(relayOffTime, false);
+            handleTimeSetting(relayOffTimeMinutes, false); // false = меняем минуты
             previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
             displayVisible = 1;
             previousMillisHoldIncr = currentMillis;
@@ -677,7 +692,6 @@ void loop() {
       if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncrFast) {
-												   
             fillInFlag = 1;
             signed long currentPPM = loadedDelay % 1000L;
             currentPPM++;
@@ -721,7 +735,6 @@ void loop() {
       if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncrFast) {
-												   
             fillInFlag = 1;
             if (loadedDelay >= 0) loadedDelay += 1000L;
             else loadedDelay -= 1000L;
@@ -734,7 +747,6 @@ void loop() {
           }
         }
       }
-	 
       if (buttonSel == buttonState::PUSHED) {
         fillInFlag = 1;
         settingDigitFirst = 0; // diap to blink
@@ -754,17 +766,17 @@ void loop() {
   // Update buffer
     if (fillInFlag) {
     switch (workMode) {
-      case workState::VIEW_TIME: setTime(currentTime); break;
+      case workState::VIEW_TIME: setTime(currentTimeHours, currentTimeMinutes, currentTimeSeconds); break;
       case workState::VIEW_TEMP: setTemp(tempC_aver); break;
       case workState::PROG_1: setProg(1); break;
-      case workState::SET_HOUR_TIME: setTime(currentTime); break;
-      case workState::SET_MINUTE_TIME: setTime(currentTime); break;
+      case workState::SET_HOUR_TIME: setTime(currentTimeHours, currentTimeMinutes, currentTimeSeconds); break;
+      case workState::SET_MINUTE_TIME: setTime(currentTimeHours, currentTimeMinutes, currentTimeSeconds); break;
       case workState::PROG_2: setProg(2); break;
-      case workState::SET_HOUR_ON: setTime(relayOnTime); break;
-      case workState::SET_MINUTE_ON: setTime(relayOnTime); break;
+      case workState::SET_HOUR_ON: setTime(relayOnTimeHours, relayOnTimeMinutes, 0); break;
+      case workState::SET_MINUTE_ON: setTime(relayOnTimeHours, relayOnTimeMinutes, 0); break;
       case workState::PROG_3: setProg(3); break;
-      case workState::SET_HOUR_OFF: setTime(relayOffTime); break;
-      case workState::SET_MINUTE_OFF: setTime(relayOffTime); break;
+      case workState::SET_HOUR_OFF: setTime(relayOffTimeHours, relayOffTimeMinutes, 0); break;
+      case workState::SET_MINUTE_OFF: setTime(relayOffTimeHours, relayOffTimeMinutes, 0); break;
 #ifdef USE_QUARTZ_CALIB
       case workState::PROG_4: setProg(4); break;
       case workState::SET_PPM_DELAY: setValue(loadedDelay % 1000L); break;
@@ -779,7 +791,7 @@ void loop() {
     previousMillisDigits = currentMillis;
     digitalWrite(DIGITS[currentDigit], HIGH); // Turn off previuos digit
     currentDigit = ++currentDigit%4;
-    printSymbol(symbolInDigits[currentDigit], SRCLK47, SER47, RCLK47);
+    printSymbol(symbolInDigits[currentDigit]);
     if (currentDigit >= settingDigitFirst && currentDigit <= settingDigitLast) {
       if (displayVisible) {
         digitalWrite(DIGITS[currentDigit], LOW); // Turn on next digit
@@ -791,59 +803,37 @@ void loop() {
 
 }
 
-void clearShift(const int SRCLK, const int SER, const int RCLK) {
+void clearShift() {
   // for 7-segment display
-  digitalWrite(SRCLK, LOW);
-  digitalWrite(SER, LOW);
-  digitalWrite(RCLK, LOW);
-  for (byte i = 0; i < 8; i++) {
-    digitalWrite(SRCLK, HIGH);
-    digitalWrite(SRCLK, LOW);
-  }
-  digitalWrite(RCLK, HIGH);
-  digitalWrite(RCLK, LOW);
+  shiftOut(SER47, SRCLK47, LSBFIRST, 0);
+  digitalWrite(RCLK47, HIGH);
+  digitalWrite(RCLK47, LOW);
 }
 
-void printSymbol(byte num, const byte SRCLK, const byte SER, const byte RCLK) {
-  for (byte i = 0; i < 8; i++) {
-    digitalWrite(SER, ((1 << i) & num) ? HIGH : LOW);
-    digitalWrite(SRCLK, HIGH);
-    digitalWrite(SRCLK, LOW);
-  }
-  digitalWrite(SER, LOW);
-  digitalWrite(RCLK, HIGH);
-  digitalWrite(RCLK, LOW);
+void printSymbol(byte num) {
+  shiftOut(SER47, SRCLK47, LSBFIRST, num);
+  digitalWrite(RCLK47, HIGH);
+  digitalWrite(RCLK47, LOW);
 }
 
-void handleTimeSetting(unsigned long &time, bool isHours) {
+void handleTimeSetting(byte &time, bool isHours) {
   fillInFlag = 1;
-  unsigned long hours = time / 3600L;
-  unsigned long minutes = (time % 3600L) / 60L;
   
   if (isHours) {
-    hours = ++hours % 24;
-  } else {
-    minutes = ++minutes % 60;
+    time = ++time % 24;
+  } else { // minutes
+    time = ++time % 60;
   }
-  time = (hours * 3600L) + (minutes * 60L);
+
 }
 
-void setTime(unsigned long time) {
-  byte hour = time/3600;
-  byte minute = (time/60)%60;
-  byte second = time%60;
-
-  // char buf[10]; // Буфер для строки "00:00:00" + символ завершения строки
-  // sprintf(buf, "%02d:%02d:%02d", hour, minute, second);
-  // Serial.println(buf);
-
+void setTime(byte hour, byte minute, byte second) {
   symbolInDigits[0] = hexArray[hour / 10];
   symbolInDigits[1] = hexArray[hour % 10];
   if (second % 2) symbolInDigits[1] |= dotSign; // мигающая точка
   symbolInDigits[2] = hexArray[minute / 10];
   symbolInDigits[3] = hexArray[minute % 10];
 }
-
 void setValue(signed long num) {
   // Serial.println(num);
   long absVal = abs(num);
@@ -859,7 +849,7 @@ void setValue(signed long num) {
   symbolInDigits[1] = 0;
   symbolInDigits[2] = 0;
   symbolInDigits[3] = hexArray[ones]; // Последняя цифра всегда есть
-  
+
   // Логика для десятков и сотен (гашение нулей и позиция минуса)
   if (absVal >= 100) {
     symbolInDigits[1] = hexArray[hundreds];
@@ -884,9 +874,14 @@ void setLargeValue(signed long num) {
 
 void setTemp(float temp) {
 
-  byte tens = (static_cast<int>(temp)/10)%10;
-  byte ones = static_cast<int>(temp)%10;
-  byte tenths = (static_cast<int>(temp*10.0))%10;
+  int tempInt = (temp >= 0) ? static_cast<int>(temp * 10.0f + 0.5f)
+                            : static_cast<int>(temp * 10.0f - 0.5f);
+  int absTemp = abs(tempInt);
+
+  byte tenths = absTemp % 10; // Десятые доли (последняя цифра)
+  int whole = absTemp / 10; // Целая часть температуры
+  byte ones = whole % 10; // Единицы
+  byte tens = whole / 10; // Десятки
 
   if (temp < 0) {symbolInDigits[0] = minusSign;}
   else {symbolInDigits[0] = 0;}
@@ -927,10 +922,12 @@ void setProg(byte num) {
 void saveSettings(byte num) {
   switch (num) {
     case 1:
-      EEPROM.put(ADDR_TIME_ON, relayOnTime);
+      // EEPROM.put(ADDR_TIME_ON, relayOnTime);
+      EEPROM.put(ADDR_TIME_ON, static_cast<int>((relayOnTimeHours << 8) | relayOnTimeMinutes));
       break;
     case 2:
-      EEPROM.put(ADDR_TIME_OFF, relayOffTime);
+      // EEPROM.put(ADDR_TIME_OFF, relayOffTime);
+      EEPROM.put(ADDR_TIME_OFF, static_cast<int>((relayOffTimeHours << 8) | relayOffTimeMinutes));
       break;
 #ifdef USE_QUARTZ_CALIB
     case 3:
@@ -944,12 +941,19 @@ void saveSettings(byte num) {
 }
 
 void loadSettings() {
-  EEPROM.get(ADDR_TIME_ON, relayOnTime);
-  EEPROM.get(ADDR_TIME_OFF, relayOffTime);
+  int value;
+  EEPROM.get(ADDR_TIME_ON, value);
+  relayOnTimeHours = value >> 8;
+  relayOnTimeMinutes = value;
+  EEPROM.get(ADDR_TIME_OFF, value);
+  relayOffTimeHours = value >> 8;
+  relayOffTimeMinutes = value;
 
   // Проверка на "мусор" (если EEPROM пустая, там могут быть огромные числа)
-  if (relayOnTime >= 86400) relayOnTime = 0;
-  if (relayOffTime >= 86400) relayOffTime = 0;
+  if (relayOnTimeHours >= 24) relayOnTimeHours = 0;
+  if (relayOffTimeHours >= 24) relayOffTimeHours = 0;
+  if (relayOnTimeMinutes >= 60) relayOnTimeMinutes = 0;
+  if (relayOffTimeMinutes >= 60) relayOffTimeMinutes = 0;
   // Serial.println("Settings loaded from EEPROM");
 
 #ifdef USE_QUARTZ_CALIB
