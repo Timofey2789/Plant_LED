@@ -25,19 +25,21 @@
 //                |  |  |  |  |  |
 //                e  d  dp c  g  d4
 
-// #define USE_EEPROM
+#define USE_EEPROM
 #ifdef USE_EEPROM
 #include <EEPROM.h>
 
 // memory
 const int ADDR_TIME_ON = 0; // 2 byte
 const int ADDR_TIME_OFF = 2; // 2 byte
-const int ADDR_PPM_DELAY = 4; // unsigned long
+const int ADDR_K_COEFF = 4; // float (4 byte)
+const int ADDR_C_COEFF = 8; // float (4 byte)
 #endif
 
 const byte SRCLK47			 = 2; // pin 11 SN74HC595 for 4digital segment
 const byte RCLK47			 = 4; // pin 12 SN74HC595 for 4digital segment
 const byte OE47				 = 5; // pin 13 SN74HC595 (PWM) 4digital segment
+   
 const byte SER47			 = 14; // A0 pin 14 SN74HC595 for 4digital segment
 const byte DIGITS[]			 = {15, 19, 3, 18};
 const byte THERMO 			 = 20; // A6
@@ -49,21 +51,6 @@ unsigned long currentMillis = 0;
 unsigned long previousMillisTIME = 0; // will store last TIME was updated
 const unsigned long intervalTIME = 1000; // milisec
 unsigned long actualIntervalTIME = 0; // milisec
-
-// Формула: Ошибка в секундах за сутки * 11.57.
-// 100 -> 200 slow timer. Need make faster
-// 200 -> 100 fast timer. Need make slower
-#define USE_QUARTZ_CALIB
-#ifdef USE_QUARTZ_CALIB
-  signed long loadedDelay = 3009; // positive value - fast, negative - slow
-  byte isMakeSlow = (loadedDelay >= 0) ? 0 : 1;
-  // if isMakeSlow = 0 ppmDelay (microsec) the more, the faster
-  // if isMakeSlow = 1 ppmDelay (microsec) the more, the slower
-  unsigned long ppmDelay = abs(loadedDelay); // microsec
-  unsigned long delayMillis = ppmDelay/1000 + 1; // milisec // ceil(ppmDelay)
-  unsigned long accTimeCalib = delayMillis*1000; // microsec
-  unsigned long calibrationCounter = 0; // microsec
-#endif
 
 byte currentTimeHours = 12;
 byte currentTimeMinutes = 0;
@@ -90,6 +77,7 @@ const byte prog1Array[] = {B00000000, B00000000, B11000111, B01001000};
 const byte prog2Array[] = {B00000000, B00000000, B11000111, B01100111};
 const byte prog3Array[] = {B00000000, B00000000, B11000111, B01101011};
 const byte prog4Array[] = {B00000000, B00000000, B11000111, B11001001};
+
 byte currentDigit = 0;
 byte symbolInDigits[] = {0, 0, 0, 0}; // Fill in by symbols
 byte fillInFlag = 1;
@@ -115,6 +103,7 @@ enum buttonState : byte{
 };
 buttonState buttonSel = RELEASED;
 buttonState buttonIncr = RELEASED;
+
 enum workState : byte{
   VIEW_TIME, // current time
   VIEW_TEMP, // average temperature
@@ -128,8 +117,9 @@ enum workState : byte{
   SET_HOUR_OFF,
   SET_MINUTE_OFF,
   PROG_4,
-  SET_PPM_DELAY,
-  SET_PPTHOUSAND_DELAY,
+  SET_K_VALUE,
+  SET_C_HIGH,
+  SET_C_LOW,
 };
 workState workMode = SET_HOUR_TIME;
 byte displayVisible = 1;
@@ -154,6 +144,29 @@ unsigned long actualIntervalTempSensor = 0; // milisec
 float tempC_aver = 25.0; // Стартовое значение (примерная комнатная температура)
 const float k_filter = 1.0; // Коэффициент фильтрации (от 0.01 до 1.0) 1.0 - полностью новое значеие
 byte print_tempC_aver = 0;
+
+// Формула: Ошибка в секундах за сутки * 11.57.
+// 100 -> 200 slow timer. Need make faster
+// 200 -> 100 fast timer. Need make slower
+#define USE_QUARTZ_CALIB
+#ifdef USE_QUARTZ_CALIB
+
+  float coeff_K = 2.97f;
+  float coeff_C = 2920.0f;
+  signed long k_raw_value = (signed long)(coeff_K * 100.0f + (coeff_K >= 0 ? 0.5f : -0.5f)); // 297
+  signed long c_raw_high = (signed long)(coeff_C / 10.0f + (coeff_C >= 0 ? 0.5f : -0.5f)); // +292
+  signed long c_raw_low = abs((signed long)(coeff_C * 10.0f + (coeff_C >= 0 ? 0.5f : -0.5f))) % 100; // 0.0
+
+  float ppmCalculated = (coeff_K * tempC_aver) + coeff_C;
+  signed long loadedDelay = static_cast<signed long>(ppmCalculated >= 0 ? ppmCalculated + 0.5f : ppmCalculated - 0.5f);; // positive value - fast, negative - slow
+  byte isMakeSlow = (loadedDelay >= 0) ? 0 : 1;
+  // if isMakeSlow = 0 ppmDelay (microsec) the more, the faster
+  // if isMakeSlow = 1 ppmDelay (microsec) the more, the slower
+  unsigned long ppmDelay = abs(loadedDelay); // microsec
+  unsigned long delayMillis = ppmDelay/1000 + 1; // milisec // ceil(ppmDelay)
+  unsigned long accTimeCalib = delayMillis*1000; // microsec
+  unsigned long calibrationCounter = 0; // microsec
+#endif
 
 // UART input
 const byte BUFFER_SIZE = 10; // Максимальная длина числа + 1 для нуля
@@ -569,7 +582,7 @@ void loop() {
       }
       if (buttonIncr == buttonState::PUSHED) {
         handleTimeSetting(relayOnTimeMinutes, false); // false = меняем минуты
-        previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на  текущий момент
+        previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
         previousMillisHoldIncr = currentMillis;
@@ -697,22 +710,18 @@ void loop() {
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 3; // diap to blink
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
-        workMode = workState::SET_PPM_DELAY;
+        workMode = workState::SET_K_VALUE;
       }
       break;
-    case workState::SET_PPM_DELAY:
+    case workState::SET_K_VALUE:
       if (currentMillis - previousMillisBlink >= intervalBlink2Hz) {
         previousMillisBlink = currentMillis;
         displayVisible = !displayVisible;
       }
       if (buttonIncr == buttonState::PUSHED) {
         fillInFlag = 1;
-        signed long currentPPM = loadedDelay % 1000L;
-        currentPPM++;
-        if (currentPPM > 999) currentPPM = -999;
-        signed long head = (abs(loadedDelay) / 1000L) * 1000L;
-        if (currentPPM < 0) loadedDelay = -head + currentPPM;
-        else loadedDelay = head + currentPPM;
+        k_raw_value++;
+        if (k_raw_value > 999) k_raw_value = -999; // Диапазон для наклона наклона
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
@@ -723,12 +732,8 @@ void loop() {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncrFast) {
             fillInFlag = 1;
-            signed long currentPPM = loadedDelay % 1000L;
-            currentPPM++;
-            if (currentPPM > 999) currentPPM = -999;
-            signed long head = (abs(loadedDelay) / 1000L) * 1000L;
-            if (currentPPM < 0) loadedDelay = -head + currentPPM;
-            else loadedDelay = head + currentPPM;
+            k_raw_value++;
+            if (k_raw_value > 999) k_raw_value = -999; // Диапазон для наклона наклона
             previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
             displayVisible = 1;
             previousMillisHoldIncr = currentMillis;
@@ -737,48 +742,7 @@ void loop() {
       }
       if (buttonSel == buttonState::PUSHED) {
         fillInFlag = 1;
-        settingDigitFirst = 0; // diap to blink
-        settingDigitLast = 3; // diap to blink
-        displayVisible = 1;
-        buttonSel = buttonState::HOLD;
-        workMode = workState::SET_PPTHOUSAND_DELAY;
-      }
-      break;
-    case workState::SET_PPTHOUSAND_DELAY:
-      if (currentMillis - previousMillisBlink >= intervalBlink2Hz) {
-        previousMillisBlink = currentMillis;
-        displayVisible = !displayVisible;
-      }
-      if (buttonIncr == buttonState::PUSHED) {
-        fillInFlag = 1;
-        if (loadedDelay >= 0) loadedDelay += 1000L;
-        else loadedDelay -= 1000L;
-        if (abs(loadedDelay) >= 1000000L) {
-          loadedDelay = loadedDelay % 1000L; // Сброс тысяч, оставляем только PPM
-        }
-        previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
-        displayVisible = 1;
-        previousMillisPushIncr = currentMillis;
-        previousMillisHoldIncr = currentMillis;
-        buttonIncr = buttonState::HOLD;
-      }
-      if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
-        if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
-          if (currentMillis - previousMillisHoldIncr >= intervalAutoIncrFast) {
-            fillInFlag = 1;
-            if (loadedDelay >= 0) loadedDelay += 1000L;
-            else loadedDelay -= 1000L;
-            if (abs(loadedDelay) >= 1000000L) {
-              loadedDelay = loadedDelay % 1000L; // Сброс тысяч, оставляем только PPM
-            }
-            previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
-            displayVisible = 1;
-            previousMillisHoldIncr = currentMillis;
-          }
-        }
-      }
-      if (buttonSel == buttonState::PUSHED) {
-        fillInFlag = 1;
+        coeff_K = (float)k_raw_value / 100.0f; // Переводим обратно во float, делением на 100.0
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 3; // diap to blink
         displayVisible = 1;
@@ -786,7 +750,85 @@ void loop() {
 #ifdef USE_EEPROM
         saveSettings(3);
 #endif
-        setPPMDelay();
+        workMode = workState::SET_C_HIGH;
+      }
+      break;
+    case workState::SET_C_HIGH:
+      if (currentMillis - previousMillisBlink >= intervalBlink2Hz) {
+        previousMillisBlink = currentMillis;
+        displayVisible = !displayVisible;
+      }
+      if (buttonIncr == buttonState::PUSHED) {
+        fillInFlag = 1;
+        c_raw_high++;
+        if (c_raw_high > 999) c_raw_high = -999; // Полный диапазон со знаком минус!
+        previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
+        displayVisible = 1;
+        previousMillisPushIncr = currentMillis;
+        previousMillisHoldIncr = currentMillis;
+        buttonIncr = buttonState::HOLD;
+      }
+      if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
+        if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
+          if (currentMillis - previousMillisHoldIncr >= intervalAutoIncrFast) {
+            fillInFlag = 1;
+            c_raw_high++;
+            if (c_raw_high > 999) c_raw_high = -999; // Полный диапазон со знаком минус!
+            previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
+            displayVisible = 1;
+            previousMillisHoldIncr = currentMillis;
+          }
+        }
+      }
+      if (buttonSel == buttonState::PUSHED) {
+        fillInFlag = 1;
+        settingDigitFirst = 0; // diap to blink
+        settingDigitLast = 3; // diap to blink
+        displayVisible = 1;
+        buttonSel = buttonState::HOLD;
+        workMode = workState::SET_C_LOW;
+      }
+      break;
+    case workState::SET_C_LOW:
+      if (currentMillis - previousMillisBlink >= intervalBlink2Hz) {
+        previousMillisBlink = currentMillis;
+        displayVisible = !displayVisible;
+      }
+      if (buttonIncr == buttonState::PUSHED) {
+        fillInFlag = 1;
+        c_raw_low = (c_raw_low + 1) % 100; // от 00 до 99 (всегда плюс)
+        previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
+        displayVisible = 1;
+        previousMillisPushIncr = currentMillis;
+        previousMillisHoldIncr = currentMillis;
+        buttonIncr = buttonState::HOLD;
+      }
+      if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
+        if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
+          if (currentMillis - previousMillisHoldIncr >= intervalAutoIncrFast) {
+            fillInFlag = 1;
+            c_raw_low = (c_raw_low + 1) % 100; // от 00 до 99 (всегда плюс)
+            previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
+            displayVisible = 1;
+            previousMillisHoldIncr = currentMillis;
+          }
+        }
+      }
+      if (buttonSel == buttonState::PUSHED) {
+        fillInFlag = 1;
+        if (c_raw_high >= 0) { // Собираем float C из частей
+          coeff_C = ((float)c_raw_high * 10.0f) + ((float)c_raw_low / 10.0f);
+        } else {
+          coeff_C = ((float)c_raw_high * 10.0f) - ((float)c_raw_low / 10.0f);
+        }
+        settingDigitFirst = 0; // diap to blink
+        settingDigitLast = 3; // diap to blink
+        displayVisible = 1;
+        buttonSel = buttonState::HOLD;
+#ifdef USE_EEPROM
+        saveSettings(4);
+#endif
+        updateCalibrationByTemperature(); // Сразу пересчитываем таймеры с новыми коэффициентами
         workMode = workState::VIEW_TIME;
       }
       break;
@@ -809,8 +851,9 @@ void loop() {
       case workState::SET_MINUTE_OFF: setTime(relayOffTimeHours, relayOffTimeMinutes, 0); break;
 #ifdef USE_QUARTZ_CALIB
       case workState::PROG_4: setProg(4); break;
-      case workState::SET_PPM_DELAY: setValue(loadedDelay % 1000L); break;
-      case workState::SET_PPTHOUSAND_DELAY: setLargeValue(abs(loadedDelay)); break;
+      case workState::SET_K_VALUE: setDotValue(k_raw_value, 1); break;
+      case workState::SET_C_HIGH: setValue(c_raw_high); break;
+      case workState::SET_C_LOW: setDotValue(c_raw_low, 2); break;
 #endif
     }
     fillInFlag = 0;
@@ -900,6 +943,37 @@ void setValue(signed long num) {
   }
 }
 
+void setDotValue(signed long num, byte dotPosition) {
+  long absVal = abs(num);
+
+  // Очищаем буфер (заполняем пустотой)
+  symbolInDigits[0] = 0;
+  symbolInDigits[1] = 0;
+  symbolInDigits[2] = 0;
+  symbolInDigits[3] = 0;
+
+  byte digitIdx = 3;
+    while (digitIdx >= 0) {
+      symbolInDigits[digitIdx] = hexArray[absVal % 10];
+      absVal /= 10;
+      if (absVal == 0 && digitIdx <= dotPosition) {
+        digitIdx--;
+        break;
+      }
+      digitIdx--;
+    }
+    if (num < 0) {
+      if (digitIdx >= 0) {
+        symbolInDigits[digitIdx] = minusSign;
+      } else {
+        symbolInDigits[0] = minusSign;
+      }
+    }
+    if (dotPosition <= 3) {
+      symbolInDigits[dotPosition] |= dotSign;
+    }
+}
+
 void setLargeValue(signed long num) {
   // Serial.println(loadedDelay);
   long thousands = num / 1000;
@@ -966,7 +1040,10 @@ void saveSettings(byte num) {
       break;
 #ifdef USE_QUARTZ_CALIB
     case 3:
-      EEPROM.put(ADDR_PPM_DELAY, loadedDelay);
+      EEPROM.put(ADDR_K_COEFF, coeff_K);
+      break;
+    case 4:
+      EEPROM.put(ADDR_C_COEFF, coeff_C);
       break;
 #endif // USE_QUARTZ_CALIB
     default:
@@ -992,21 +1069,40 @@ void loadSettings() {
   // Serial.println("Settings loaded from EEPROM");
 
 #ifdef USE_QUARTZ_CALIB
-  EEPROM.get(ADDR_PPM_DELAY, loadedDelay);
-  // Serial.println(loadedDelay);
-  setPPMDelay();
+  float coeff = 0;
+  EEPROM.get(ADDR_K_COEFF, coeff);
+  if (!isnan(coeff) && coeff < 10.0f && coeff > -10.0f) coeff_K = coeff;
+  EEPROM.get(ADDR_C_COEFF, coeff);
+  if (!isnan(coeff) && coeff < 10000.0f && coeff > -10000.0f) coeff_C = coeff;
+
+  k_raw_value = static_cast<signed long>(coeff_K * 100.0f + (coeff_K >= 0 ? 0.5f : -0.5f));
+  c_raw_high = static_cast<signed long>(coeff_C / 10.0f + (coeff_C >= 0 ? 0.5f : - 0.5f)); // +292
+  c_raw_low = abs(static_cast<signed long>(coeff_C * 10.0f + (coeff_C >= 0 ? 0.5f : -0.5f))) % 100; // 0.0
+
+  Serial.println(coeff_K);
+  Serial.println(coeff_C);
+  updateCalibrationByTemperature();
 #endif
 
 }
 #endif
 
 #ifdef USE_QUARTZ_CALIB
+void updateCalibrationByTemperature() {
+  // Линейная аппроксимация:
+  ppmCalculated = coeff_C + (coeff_K * tempC_aver);
+  // Округляем до целого числа для переменной loadedDelay
+  loadedDelay = static_cast<signed long>(ppmCalculated >= 0 ? ppmCalculated + 0.5f : ppmCalculated - 0.5f);
+  // Обновляем настройки таймера
+  setPPMDelay();
+}
+
 void setPPMDelay() {
   ppmDelay = abs(loadedDelay); // microsec
   isMakeSlow = (loadedDelay >= 0) ? 0 : 1; // positive value - fast, negative - slow
   delayMillis = ppmDelay/1000 + 1; // milisec // ceil(ppmDelay)
   accTimeCalib = delayMillis*1000; // microsec
-  calibrationCounter = 0; // microsec
+  // calibrationCounter = 0; // если вызывать setPPM во время работы платы, то счётчик не должен сбрасываться
   // Serial.print("loadedDelay: ");
   // Serial.println(loadedDelay);
   // Serial.print("ppmDelay: ");
@@ -1019,18 +1115,5 @@ void setPPMDelay() {
   // Serial.println(accTimeCalib);
   // Serial.print("calibrationCounter: ");
   // Serial.println(calibrationCounter);
-}
-
-void updateCalibrationByTemperature() {
-  float T = tempC_aver;
-  // Линейная аппроксимация по результатам  графика:
-  // При 0°C базовая точка -2940 PPM. С каждым градусом падаем на 3.33 PPM.
-  float ppmCalculated = 2920.0f + (2.97f * T);
-
-  // Округляем до целого числа для переменной loadedDelay
-  loadedDelay = static_cast<signed long>(ppmCalculated >= 0 ? ppmCalculated + 0.5f : ppmCalculated - 0.5f);
-
-  // Обновляем настройки таймера
-  setPPMDelay();
 }
 #endif
