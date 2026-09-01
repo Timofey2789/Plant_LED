@@ -25,36 +25,53 @@
 //                |  |  |  |  |  |
 //                e  d  dp c  g  d4
 
+#define USE_OPTRONE
+#ifndef USE_OPTRONE
+  #define USE_QUARTZ
+  #ifdef USE_QUARTZ
+    #define USE_QUARTZ_CALIB
+  #endif
+#endif
+
 #define USE_EEPROM
 #ifdef USE_EEPROM
 #include <EEPROM.h>
-
 // memory
-const int ADDR_TIME_ON = 0; // 2 byte
-const int ADDR_TIME_OFF = 2; // 2 byte
-const int ADDR_K_COEFF = 4; // float (4 byte)
-const int ADDR_C_COEFF = 8; // float (4 byte)
+const int ADDR_TIME_ON = 0;   // uint16_t (2 byte)
+const int ADDR_TIME_OFF = 2;  // uint16_t (2 byte)
+const int ADDR_K_COEFF = 4;   // float (4 byte)
+const int ADDR_C_COEFF = 8;   // float (4 byte)
 #endif
 
-const byte SRCLK47			 = 2; // pin 11 SN74HC595 for 4digital segment
-const byte RCLK47			 = 4; // pin 12 SN74HC595 for 4digital segment
-const byte OE47				 = 5; // pin 13 SN74HC595 (PWM) 4digital segment
-   
-const byte SER47			 = 14; // A0 pin 14 SN74HC595 for 4digital segment
-const byte DIGITS[]			 = {15, 19, 3, 18};
-const byte THERMO 			 = 20; // A6
-const byte BUTTON_SEL		 = 17; // А3 make INPUT_PULLUP
-const byte BUTTON_INCR		 = 16; // А2 make INPUT_PULLUP
-const byte RELAY			 = 7;
+const byte SRCLK47     = 2; // pin 11 SN74HC595 for 4digital segment
+const byte RCLK47      = 4; // pin 12 SN74HC595 for 4digital segment
+const byte OE47        = 5; // pin 13 SN74HC595 (PWM) 4digital segment
+const byte SER47       = 14; // A0 pin 14 SN74HC595 for 4digital segment
+const byte DIGITS[]    = {15, 19, 3, 18};
+const byte THERMO      = 20; // A6
+const byte BUTTON_SEL  = 17; // А3 make INPUT_PULLUP
+const byte BUTTON_INCR = 16; // А2 make INPUT_PULLUP
+const byte RELAY       = 7;
+const byte OPTRONE     = 8;
 
 unsigned long currentMillis = 0;
 unsigned long previousMillisTIME = 0; // will store last TIME was updated
 const unsigned long intervalTIME = 1000; // milisec
 unsigned long actualIntervalTIME = 0; // milisec
 
-byte currentTimeHours = 12;
-byte currentTimeMinutes = 0;
-byte currentTimeSeconds = 0;
+#ifdef USE_OPTRONE
+  const unsigned long previousInterruptTIME = 2500; // microsec
+  volatile byte optroneHalfCycles = 0;
+  volatile bool updateTIME = false;
+
+  volatile byte currentTimeHours = 12;
+  volatile byte currentTimeMinutes = 0;
+  volatile byte currentTimeSeconds = 0;
+#else
+  byte currentTimeHours = 12;
+  byte currentTimeMinutes = 0;
+  byte currentTimeSeconds = 0;
+#endif
 
 byte relayState = 0;
 byte lastRelayState = 0;
@@ -108,8 +125,8 @@ enum workState : byte{
   VIEW_TIME, // current time
   VIEW_TEMP, // average temperature
   PROG_1, // P1 logo
-  SET_HOUR_TIME, //
-  SET_MINUTE_TIME,//
+  SET_HOUR_TIME,
+  SET_MINUTE_TIME,
   PROG_2,
   SET_HOUR_ON,
   SET_MINUTE_ON,
@@ -117,11 +134,12 @@ enum workState : byte{
   SET_HOUR_OFF,
   SET_MINUTE_OFF,
   PROG_4,
-  SET_K_VALUE,
+  SET_K_HIGH,
+  SET_K_LOW,
   SET_C_HIGH,
   SET_C_LOW,
 };
-workState workMode = SET_HOUR_TIME;
+workState workMode = SET_HOUR_TIME; // VIEW_TIME;
 byte displayVisible = 1;
 byte settingDigitFirst = 0; // diap to blink
 byte settingDigitLast = 1; // diap to blink
@@ -138,9 +156,7 @@ const float NOMINAL_TEMPERATURE = 25.0;
 unsigned long previousTempSensor = 0;
 const unsigned long intervalTempSensor = 10000; // Проверяем температуру раз в 10 секунд
 unsigned long actualIntervalTempSensor = 0; // milisec
-// TEMPORARY
-// unsigned long measurementNum = 0;
-// float tempC_aver = 0.0;
+
 float tempC_aver = 25.0; // Стартовое значение (примерная комнатная температура)
 const float k_filter = 1.0; // Коэффициент фильтрации (от 0.01 до 1.0) 1.0 - полностью новое значеие
 byte print_tempC_aver = 0;
@@ -148,30 +164,55 @@ byte print_tempC_aver = 0;
 // Формула: Ошибка в секундах за сутки * 11.57.
 // 100 -> 200 slow timer. Need make faster
 // 200 -> 100 fast timer. Need make slower
-#define USE_QUARTZ_CALIB
 #ifdef USE_QUARTZ_CALIB
+  float coeff_K = 2.971f;
+  float coeff_C = 2921.1f;
+  int16_t k_raw_high = 29;    // (coeff_K * 10.0f) % 100
+  int16_t k_raw_low = 71;     // (coeff_K * 1000.0f) % 100
+  int16_t c_raw_high  = 292;  // coeff_C / 10.0f
+  int16_t c_raw_low = 11;     // (coeff_C * 10.0f) % 100
 
-  float coeff_K = 2.97f;
-  float coeff_C = 2920.0f;
-  signed long k_raw_value = (signed long)(coeff_K * 100.0f + (coeff_K >= 0 ? 0.5f : -0.5f)); // 297
-  signed long c_raw_high = (signed long)(coeff_C / 10.0f + (coeff_C >= 0 ? 0.5f : -0.5f)); // +292
-  signed long c_raw_low = abs((signed long)(coeff_C * 10.0f + (coeff_C >= 0 ? 0.5f : -0.5f))) % 100; // 0.0
-
-  float ppmCalculated = (coeff_K * tempC_aver) + coeff_C;
-  signed long loadedDelay = static_cast<signed long>(ppmCalculated >= 0 ? ppmCalculated + 0.5f : ppmCalculated - 0.5f);; // positive value - fast, negative - slow
+  float ppmCalculated = 0.0f;
+  int32_t loadedDelay = 0; // positive value - fast, negative - slow
   byte isMakeSlow = (loadedDelay >= 0) ? 0 : 1;
   // if isMakeSlow = 0 ppmDelay (microsec) the more, the faster
   // if isMakeSlow = 1 ppmDelay (microsec) the more, the slower
-  unsigned long ppmDelay = abs(loadedDelay); // microsec
-  unsigned long delayMillis = ppmDelay/1000 + 1; // milisec // ceil(ppmDelay)
-  unsigned long accTimeCalib = delayMillis*1000; // microsec
-  unsigned long calibrationCounter = 0; // microsec
+  uint32_t ppmDelay = abs(loadedDelay); // microsec
+  uint32_t delayMillis = ppmDelay/1000 + 1; // milisec // ceil(ppmDelay)
+  uint32_t accTimeCalib = delayMillis*1000; // microsec
+  uint32_t calibrationCounter = 0; // microsec
 #endif
 
-// UART input
-const byte BUFFER_SIZE = 10; // Максимальная длина числа + 1 для нуля
-char inputBuffer[BUFFER_SIZE]; // Массив для хранения символов
-byte bufferIndex = 0; // Индекс текущего символа
+#ifdef USE_OPTRONE
+ISR(PCINT0_vect) {
+  static unsigned long previousInterrupt = 0; // will store last time Interrupt was updated
+  unsigned long currentMicros = micros();
+
+  if (PINB & 1) { // posedge on pin 8
+    if (currentMicros - previousInterrupt >= previousInterruptTIME) { // debounce
+      optroneHalfCycles++;
+      if (optroneHalfCycles >= 100) { // 100 half cycles = 1 second
+        optroneHalfCycles = 0;
+        updateTIME = true;
+        if (workMode != workState::SET_HOUR_TIME && workMode != workState::SET_MINUTE_TIME) {
+          currentTimeSeconds++;
+          if (currentTimeSeconds >= 60) {
+            currentTimeSeconds = 0;
+            currentTimeMinutes++;
+            if (currentTimeMinutes >= 60) {
+              currentTimeMinutes = 0;
+              currentTimeHours++;
+              if (currentTimeHours >= 24) {
+                currentTimeHours = 0;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+#endif
 
 void setup() {
   Serial.begin(115200);
@@ -194,82 +235,52 @@ void setup() {
   digitalWrite(RELAY, HIGH);
   pinMode(BUTTON_INCR, INPUT_PULLUP);
   pinMode(THERMO, INPUT);
+
+#ifdef USE_OPTRONE
+  pinMode(OPTRONE, INPUT_PULLUP);
+  noInterrupts();
+  PCICR |= (1 << PCIE0); // Interrupts on PortB
+  PCMSK0 |= (1 << PCINT0); // Interrupt on pin 8
+  interrupts();
+#endif
+
 #ifdef USE_EEPROM
   loadSettings();
 #endif
+
+  readThermo();
 }
 
-void loop() {
+void loop() { 
 
-  while (Serial.available() > 0) {
-    char inChar = (char)Serial.read(); // Читаем один символ
-
-    if (inChar == '\n') { // Если нажали Enter
-      inputBuffer[bufferIndex] = '\0'; // Важно: ставим маркер конца строки
-      loadedDelay = atol(inputBuffer); // Конвертируем массив символов в число
-      // Serial.print("Received loadedDelay: ");
-      // Serial.println(loadedDelay); // Выводим результат
-      bufferIndex = 0; // Сбрасываем индекс для нового ввода
-      setPPMDelay();
+#ifdef USE_OPTRONE
+  if (updateTIME) { // 1 sec interval
+    updateTIME = false;
+    // Update time on indicator
+    if (workMode == workState::VIEW_TIME) {
+      fillInFlag = 1;
     }
-    // Проверяем: цифра, минус или плюс, и не переполнен ли буфер
-    else if ((isDigit(inChar) || inChar == '-' || inChar == '+') && (bufferIndex < BUFFER_SIZE - 1)) {
-      inputBuffer[bufferIndex] = inChar; // Записываем символ в массив
-      bufferIndex++; // Сдвигаем индекс вперед
+    // update temperature
+    if (++print_tempC_aver >= 10) {
+      readThermo();
+      if (workMode == workState::VIEW_TEMP) {
+        fillInFlag = 1;
+      }
+      // debug print
+      Serial.print(tempC_aver);
+      Serial.print(",");
+      Serial.println(currentMillis);
+      print_tempC_aver = 0;
     }
   }
-
+#else
+// READ TEMPERATURE ???
 #ifdef USE_QUARTZ_CALIB
   currentMillis = millis();
   actualIntervalTempSensor = currentMillis - previousTempSensor;
   if (actualIntervalTempSensor >= intervalTempSensor) {
     previousTempSensor = previousTempSensor + (actualIntervalTempSensor/intervalTempSensor)*intervalTempSensor;
-
-    long a = analogRead(THERMO);
-    if (a > 0 && a < 1023) {
-      //1
-      // float tempC = B_COEFFICIENT / (log((1025.0 * 10 / a - 10) / 10) + B_COEFFICIENT / 298.0) - 273.15;
-      //2
-      float Rt = R_RESISTOR * ((1023.0 / (float)a) - 1.0);
-      float tempC = B_COEFFICIENT / (log(Rt / NOMINAL_RESISTANCE) + BETA_TEMP) - 273.15;
-      //3
-      // float tempC = B_COEFFICIENT / (log((1023.0 * 10 / a - 10) / 10) + BETA_TEMP) - 273.15;
-      //4
-      // float Rt = R_RESISTOR * (1023.0 / (float)a - 1.0);
-      // Serial.println(a);
-      // Serial.println(Rt);
-      // float steinhart;
-      // steinhart = Rt / NOMINAL_RESISTANCE; // (R/Ro)
-      // steinhart = log(steinhart); // ln(R/Ro)
-      // steinhart /= B_COEFFICIENT; // 1/B * ln(R/Ro)
-      // steinhart += 1.0 / (NOMINAL_TEMPERATURE + 273.15); // + (1/To)
-      // steinhart = 1.0 / steinhart; // Инвертируем, получаем Кельвины
-      // float tempC = steinhart - 273.15; // Переводим в Цельсии
-      // Serial.print("Temp: ");
-      // Serial.println(tempC);
-      // Serial.println("degree Celsius");
-
-
-      // average temperature TEMPORARY (make overflow)
-      // tempC_aver = tempC;
-      // tempC_aver *= measurementNum;
-      // tempC_aver += tempC;
-      // measurementNum++;
-      // if (measurementNum) tempC_aver /= measurementNum;
-
-      // Serial.print(" ");
-      // Serial.println(tempC_aver);
-
-
-      // for future
-      tempC_aver = (tempC * k_filter) + (tempC_aver * (1.0 - k_filter));
-      // Пересчитываем кривую PPM от температуры
-      updateCalibrationByTemperature();
-
-      // Serial.print(tempC_aver);
-      // Serial.print(",");
-      // Serial.println(millis());
-    }
+    readThermo(); // temporary
     if (workMode == workState::VIEW_TEMP) {
       fillInFlag = 1;
     }
@@ -284,12 +295,12 @@ void loop() {
 #ifdef USE_QUARTZ_CALIB
     calibrationCounter = calibrationCounter + ppmDelay; // add calibration increment (microsec)
 #endif
-    if (++print_tempC_aver >= 10) {
-      Serial.print(tempC_aver);
-      Serial.print(",");
-      Serial.println(currentMillis);
-      print_tempC_aver = 0;
-    }
+    // if (++print_tempC_aver >= 10) {
+    //   Serial.print(tempC_aver);
+    //   Serial.print(",");
+    //   Serial.println(currentMillis);
+    //   print_tempC_aver = 0;
+    // }
     // Serial.println(previousMillisTIME);
     if (workMode != workState::SET_HOUR_TIME && workMode != workState::SET_MINUTE_TIME) {
       // КАСКАДНЫЙ СЧЕТЧИК НА БЫСТРЫХ БАЙТАХ:
@@ -316,29 +327,29 @@ void loop() {
     currentMillis = millis();
     if (currentMillis - previousMillisTIME >= delayMillis) { // checking that previousMillisTIME does not overtake currentMillis
       if (calibrationCounter >= accTimeCalib) {
-          // Serial.println();
-          // Serial.println("SLOW ");
-          // Serial.println(calibrationCounter);
+        // Serial.println();
+        // Serial.println("SLOW ");
+        // Serial.println(calibrationCounter);
         calibrationCounter = calibrationCounter - accTimeCalib; // microsec
         previousMillisTIME = previousMillisTIME + delayMillis; // milisec
-
       }
     }
   } else {
     if (calibrationCounter >= accTimeCalib) {
-        // Serial.println();
-        // Serial.println("FAST ");
-        // Serial.println(calibrationCounter);
+      // Serial.println();
+      // Serial.println("FAST ");
+      // Serial.println(calibrationCounter);
       calibrationCounter = calibrationCounter - accTimeCalib; // microsec
       previousMillisTIME = previousMillisTIME - delayMillis; // milisec
     }
   }
 #endif
+#endif // USE_OPTRONE
 
   if (workMode == workState::VIEW_TIME) {
-    int currentMinutesOfDecay = (static_cast<int>(currentTimeHours) * 60) + currentTimeMinutes;
-    int relayOnMinutesOfDecay = (static_cast<int>(relayOnTimeHours) * 60) + relayOnTimeMinutes;
-    int relayOffMinutesOfDecay = (static_cast<int>(relayOffTimeHours) * 60) + relayOffTimeMinutes;
+    uint16_t currentMinutesOfDecay = (static_cast<uint16_t>(currentTimeHours) * 60) + currentTimeMinutes;
+    uint16_t relayOnMinutesOfDecay = (static_cast<uint16_t>(relayOnTimeHours) * 60) + relayOnTimeMinutes;
+    uint16_t relayOffMinutesOfDecay = (static_cast<uint16_t>(relayOffTimeHours) * 60) + relayOffTimeMinutes;
     if (relayOnMinutesOfDecay == relayOffMinutesOfDecay) {
       relayState = 0;
     } else if (relayOnMinutesOfDecay < relayOffMinutesOfDecay) {
@@ -457,9 +468,9 @@ void loop() {
         fillInFlag = 1;
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 1; // diap to blink
-        currentTimeSeconds = 0;
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         workMode = workState::SET_HOUR_TIME;
+        currentTimeSeconds = 0;
       }
       break;
     case workState::SET_HOUR_TIME:
@@ -522,7 +533,13 @@ void loop() {
         fillInFlag = 1;
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 3; // diap to blink
+#ifdef USE_OPTRONE
+        noInterrupts();
+        optroneHalfCycles = 0;
+        interrupts();
+#else // USE_QUARTZ
         previousMillisTIME = millis();
+#endif
         displayVisible = 1;
         buttonSel = buttonState::HOLD;
         workMode = workState::VIEW_TIME;
@@ -710,18 +727,18 @@ void loop() {
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 3; // diap to blink
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
-        workMode = workState::SET_K_VALUE;
+        workMode = workState::SET_K_HIGH;
       }
       break;
-    case workState::SET_K_VALUE:
+    case workState::SET_K_HIGH:
       if (currentMillis - previousMillisBlink >= intervalBlink2Hz) {
         previousMillisBlink = currentMillis;
         displayVisible = !displayVisible;
       }
       if (buttonIncr == buttonState::PUSHED) {
         fillInFlag = 1;
-        k_raw_value++;
-        if (k_raw_value > 999) k_raw_value = -999; // Диапазон для наклона наклона
+        k_raw_high++;
+        if (k_raw_high > 99) k_raw_high = -99; // Диапазон для наклона
         previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
         displayVisible = 1;
         previousMillisPushIncr = currentMillis;
@@ -732,8 +749,8 @@ void loop() {
         if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
           if (currentMillis - previousMillisHoldIncr >= intervalAutoIncrFast) {
             fillInFlag = 1;
-            k_raw_value++;
-            if (k_raw_value > 999) k_raw_value = -999; // Диапазон для наклона наклона
+            k_raw_high++;
+            if (k_raw_high > 99) k_raw_high = -99; // Диапазон для наклона
             previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
             displayVisible = 1;
             previousMillisHoldIncr = currentMillis;
@@ -742,7 +759,41 @@ void loop() {
       }
       if (buttonSel == buttonState::PUSHED) {
         fillInFlag = 1;
-        coeff_K = (float)k_raw_value / 100.0f; // Переводим обратно во float, делением на 100.0
+        settingDigitFirst = 0; // diap to blink
+        settingDigitLast = 3; // diap to blink
+        displayVisible = 1;
+        buttonSel = buttonState::HOLD;
+        workMode = workState::SET_K_LOW;
+      }
+      break;
+    case workState::SET_K_LOW:
+      if (currentMillis - previousMillisBlink >= intervalBlink2Hz) {
+        previousMillisBlink = currentMillis;
+        displayVisible = !displayVisible;
+      }
+      if (buttonIncr == buttonState::PUSHED) {
+        fillInFlag = 1;
+        k_raw_low = (k_raw_low + 1) % 100; // от 00 до 99 (всегда плюс)
+        previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
+        displayVisible = 1;
+        previousMillisPushIncr = currentMillis;
+        previousMillisHoldIncr = currentMillis;
+        buttonIncr = buttonState::HOLD;
+      }
+      if (buttonIncr == buttonState::HOLD || buttonIncr == buttonState::HOLD_2SEC) {
+        if (currentMillis - previousMillisPushIncr >= intervalAutoIncrFirst) {
+          if (currentMillis - previousMillisHoldIncr >= intervalAutoIncrFast) {
+            fillInFlag = 1;
+            k_raw_low = (k_raw_low + 1) % 100; // от 00 до 99 (всегда плюс)
+            previousMillisBlink = currentMillis; // Сбрасываем таймер мигания на текущий момент
+            displayVisible = 1;
+            previousMillisHoldIncr = currentMillis;
+          }
+        }
+      }
+      if (buttonSel == buttonState::PUSHED) {
+        fillInFlag = 1;
+        coeff_K = static_cast<float>(k_raw_high) / 10.0f + ((k_raw_high >= 0 ? 1 : -1) * static_cast<float>(k_raw_low) / 1000.0f); // Переводим обратно во float
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 3; // diap to blink
         displayVisible = 1;
@@ -816,11 +867,7 @@ void loop() {
       }
       if (buttonSel == buttonState::PUSHED) {
         fillInFlag = 1;
-        if (c_raw_high >= 0) { // Собираем float C из частей
-          coeff_C = ((float)c_raw_high * 10.0f) + ((float)c_raw_low / 10.0f);
-        } else {
-          coeff_C = ((float)c_raw_high * 10.0f) - ((float)c_raw_low / 10.0f);
-        }
+        coeff_C = static_cast<float>(c_raw_high) * 10.0f + ((c_raw_high >= 0 ? 1 : -1) * static_cast<float>(c_raw_low) / 10.0f);
         settingDigitFirst = 0; // diap to blink
         settingDigitLast = 3; // diap to blink
         displayVisible = 1;
@@ -836,24 +883,25 @@ void loop() {
   }
 
   // Update buffer
-    if (fillInFlag) {
+  if (fillInFlag) {
     switch (workMode) {
-      case workState::VIEW_TIME: setTime(currentTimeHours, currentTimeMinutes, currentTimeSeconds); break;
-      case workState::VIEW_TEMP: setTemp(tempC_aver); break;
-      case workState::PROG_1: setProg(1); break;
-      case workState::SET_HOUR_TIME: setTime(currentTimeHours, currentTimeMinutes, currentTimeSeconds); break;
+      case workState::VIEW_TIME:       setTime(currentTimeHours, currentTimeMinutes, currentTimeSeconds); break;
+      case workState::VIEW_TEMP:       setTemp(tempC_aver); break;
+      case workState::PROG_1:          setProg(1); break;
+      case workState::SET_HOUR_TIME:   setTime(currentTimeHours, currentTimeMinutes, currentTimeSeconds); break;
       case workState::SET_MINUTE_TIME: setTime(currentTimeHours, currentTimeMinutes, currentTimeSeconds); break;
-      case workState::PROG_2: setProg(2); break;
-      case workState::SET_HOUR_ON: setTime(relayOnTimeHours, relayOnTimeMinutes, 0); break;
-      case workState::SET_MINUTE_ON: setTime(relayOnTimeHours, relayOnTimeMinutes, 0); break;
-      case workState::PROG_3: setProg(3); break;
-      case workState::SET_HOUR_OFF: setTime(relayOffTimeHours, relayOffTimeMinutes, 0); break;
-      case workState::SET_MINUTE_OFF: setTime(relayOffTimeHours, relayOffTimeMinutes, 0); break;
+      case workState::PROG_2:          setProg(2); break;
+      case workState::SET_HOUR_ON:     setTime(relayOnTimeHours, relayOnTimeMinutes, 0); break;
+      case workState::SET_MINUTE_ON:   setTime(relayOnTimeHours, relayOnTimeMinutes, 0); break;
+      case workState::PROG_3:          setProg(3); break;
+      case workState::SET_HOUR_OFF:    setTime(relayOffTimeHours, relayOffTimeMinutes, 0); break;
+      case workState::SET_MINUTE_OFF:  setTime(relayOffTimeHours, relayOffTimeMinutes, 0); break;
 #ifdef USE_QUARTZ_CALIB
-      case workState::PROG_4: setProg(4); break;
-      case workState::SET_K_VALUE: setDotValue(k_raw_value, 1); break;
-      case workState::SET_C_HIGH: setValue(c_raw_high); break;
-      case workState::SET_C_LOW: setDotValue(c_raw_low, 2); break;
+      case workState::PROG_4:          setProg(4); break;
+      case workState::SET_K_HIGH:      setDotValue(k_raw_high, 2);  break;
+      case workState::SET_K_LOW:       setDotValue(k_raw_low, 0);  break;
+      case workState::SET_C_HIGH:      setValue(c_raw_high);  break;
+      case workState::SET_C_LOW:       setDotValue(c_raw_low, 2); break;
 #endif
     }
     fillInFlag = 0;
@@ -873,7 +921,7 @@ void loop() {
       digitalWrite(DIGITS[currentDigit], LOW); // Turn on next digit
     }
   }
-
+  
 }
 
 void clearShift() {
@@ -889,12 +937,12 @@ void printSymbol(byte num) {
   digitalWrite(RCLK47, LOW);
 }
 
-void handleTimeSetting(byte &time, bool isHours) {
+void handleTimeSetting(volatile byte &time, bool isHours) {
   fillInFlag = 1;
   if (isHours) {
-    time = ++time % 24;
+    time = (time + 1) % 24;
   } else { // minutes
-    time = ++time % 60;
+    time = (time + 1) % 60;
   }
 }
 
@@ -912,9 +960,9 @@ void setTime(byte hour, byte minute, byte second) {
   // }
 }
 
-void setValue(signed long num) {
+void setValue(int16_t num) {
   // Serial.println(num);
-  long absVal = abs(num);
+  uint16_t absVal = abs(num);
   byte hundreds = (absVal/100)%10;
   byte tens = (absVal/10)%10;
   byte ones = absVal%10;
@@ -939,12 +987,12 @@ void setValue(signed long num) {
     if (num < 0) symbolInDigits[1] = minusSign; // Минус во втором разряде: [ -12]
   }
   else {
-    if (num < 0) symbolInDigits[2] = minusSign; // Минус в третьем разряде: [ -1]
+    if (num < 0) symbolInDigits[2] = minusSign; // Минус в третьем разряде: [  -1]
   }
 }
 
-void setDotValue(signed long num, byte dotPosition) {
-  long absVal = abs(num);
+void setDotValue(int16_t num, byte dotPosition) {
+  uint16_t absVal = abs(num);
 
   // Очищаем буфер (заполняем пустотой)
   symbolInDigits[0] = 0;
@@ -982,17 +1030,16 @@ void setLargeValue(signed long num) {
 }
 
 void setTemp(float temp) {
+  
+  int16_t tempInt = static_cast<int16_t>(temp * 10.0f + (temp >= 0 ? 0.5f : -0.5f));
+  uint16_t absTemp = abs(tempInt);
 
-  int tempInt = (temp >= 0) ? static_cast<int>(temp * 10.0f + 0.5f)
-                            : static_cast<int>(temp * 10.0f - 0.5f);
-  int absTemp = abs(tempInt);
+  byte tenths = absTemp % 10;   // Десятые доли (последняя цифра)
+  byte whole = absTemp / 10;    // Целая часть температуры
+  byte ones = whole % 10;       // Единицы
+  byte tens = whole / 10;       // Десятки
 
-  byte tenths = absTemp % 10; // Десятые доли (последняя цифра)
-  int whole = absTemp / 10; // Целая часть температуры
-  byte ones = whole % 10; // Единицы
-  byte tens = whole / 10; // Десятки
-
-  if (temp < 0) {symbolInDigits[0] = minusSign;}
+  if (tempInt < 0) {symbolInDigits[0] = minusSign;}
   else {symbolInDigits[0] = 0;}
   symbolInDigits[1] = hexArray[tens];
   symbolInDigits[2] = hexArray[ones] | dotSign;
@@ -1000,7 +1047,7 @@ void setTemp(float temp) {
 }
 
 void setProg(byte num) {
-
+  
   switch (num) {
     case 1:
       for (byte i = 0; i < 4; i++) {
@@ -1032,11 +1079,11 @@ void saveSettings(byte num) {
   switch (num) {
     case 1:
       // EEPROM.put(ADDR_TIME_ON, relayOnTime);
-      EEPROM.put(ADDR_TIME_ON, static_cast<int>((relayOnTimeHours << 8) | relayOnTimeMinutes));
+      EEPROM.put(ADDR_TIME_ON, static_cast<uint16_t>((relayOnTimeHours << 8) | relayOnTimeMinutes));
       break;
     case 2:
       // EEPROM.put(ADDR_TIME_OFF, relayOffTime);
-      EEPROM.put(ADDR_TIME_OFF, static_cast<int>((relayOffTimeHours << 8) | relayOffTimeMinutes));
+      EEPROM.put(ADDR_TIME_OFF, static_cast<uint16_t>((relayOffTimeHours << 8) | relayOffTimeMinutes));
       break;
 #ifdef USE_QUARTZ_CALIB
     case 3:
@@ -1053,7 +1100,7 @@ void saveSettings(byte num) {
 }
 
 void loadSettings() {
-  int value;
+  uint16_t value;
   EEPROM.get(ADDR_TIME_ON, value);
   relayOnTimeHours = value >> 8;
   relayOnTimeMinutes = value;
@@ -1075,24 +1122,76 @@ void loadSettings() {
   EEPROM.get(ADDR_C_COEFF, coeff);
   if (!isnan(coeff) && coeff < 10000.0f && coeff > -10000.0f) coeff_C = coeff;
 
-  k_raw_value = static_cast<signed long>(coeff_K * 100.0f + (coeff_K >= 0 ? 0.5f : -0.5f));
-  c_raw_high = static_cast<signed long>(coeff_C / 10.0f + (coeff_C >= 0 ? 0.5f : - 0.5f)); // +292
-  c_raw_low = abs(static_cast<signed long>(coeff_C * 10.0f + (coeff_C >= 0 ? 0.5f : -0.5f))) % 100; // 0.0
+  int32_t total_k_units = static_cast<int32_t>(abs(coeff_K) * 1000.0f + 0.5f);
+  k_raw_high = (total_k_units / 100) * (coeff_K >= 0 ? 1 : -1);
+  k_raw_low = total_k_units % 100;
 
-  Serial.println(coeff_K);
-  Serial.println(coeff_C);
+  int32_t total_c_units = static_cast<int32_t>(abs(coeff_C) * 10.0f + 0.5f);
+  c_raw_high = (total_c_units / 100) * (coeff_C >= 0 ? 1 : -1);
+  c_raw_low = total_c_units % 100;
+
+  // Serial.println(coeff_K);
+  // Serial.println(coeff_C);
   updateCalibrationByTemperature();
 #endif
 
 }
 #endif
 
+void readThermo() {
+  long a = analogRead(THERMO);
+  if (a > 0 && a < 1023) {
+    //1
+    // float tempC = B_COEFFICIENT / (log((1025.0 * 10 / a - 10) / 10) + B_COEFFICIENT / 298.0) - 273.15;
+    //2
+    float Rt = R_RESISTOR * ((1023.0 / static_cast<float>(a)) - 1.0);
+    float tempC = B_COEFFICIENT / (log(Rt / NOMINAL_RESISTANCE) + BETA_TEMP) - 273.15;
+    //3
+    // float tempC = B_COEFFICIENT / (log((1023.0 * 10 / a - 10) / 10) + BETA_TEMP) - 273.15;
+    //4
+    // float Rt = R_RESISTOR * (1023.0 / (float)a - 1.0);
+    // Serial.println(a);
+    // Serial.println(Rt);
+    // float steinhart;
+    // steinhart = Rt / NOMINAL_RESISTANCE;     // (R/Ro)
+    // steinhart = log(steinhart);                      // ln(R/Ro)
+    // steinhart /= B_COEFFICIENT;                      // 1/B * ln(R/Ro)
+    // steinhart += 1.0 / (NOMINAL_TEMPERATURE + 273.15); // + (1/To)
+    // steinhart = 1.0 / steinhart;                     // Инвертируем, получаем Кельвины
+    // float tempC = steinhart - 273.15;  // Переводим в Цельсии
+    // Serial.print("Temp: ");
+    // Serial.println(tempC);
+    // Serial.println("degree Celsius");
+
+
+    // average temperature TEMPORARY (make overflow)
+    // tempC_aver = tempC;
+    // tempC_aver *= measurementNum;
+    // tempC_aver += tempC;
+    // measurementNum++;
+    // if (measurementNum) tempC_aver /= measurementNum;
+
+    // Serial.print(" ");
+    // Serial.println(tempC_aver);
+    
+    tempC_aver = (tempC * k_filter) + (tempC_aver * (1.0 - k_filter));
+    // Пересчитываем кривую PPM от температуры
+#ifdef USE_QUARTZ_CALIB
+    updateCalibrationByTemperature();
+#endif
+
+    // Serial.print(tempC_aver);
+    // Serial.print(",");
+    // Serial.println(millis());
+  }
+}
+
 #ifdef USE_QUARTZ_CALIB
 void updateCalibrationByTemperature() {
   // Линейная аппроксимация:
   ppmCalculated = coeff_C + (coeff_K * tempC_aver);
   // Округляем до целого числа для переменной loadedDelay
-  loadedDelay = static_cast<signed long>(ppmCalculated >= 0 ? ppmCalculated + 0.5f : ppmCalculated - 0.5f);
+  loadedDelay = static_cast<int32_t>(ppmCalculated >= 0 ? ppmCalculated + 0.5f : ppmCalculated - 0.5f);
   // Обновляем настройки таймера
   setPPMDelay();
 }
